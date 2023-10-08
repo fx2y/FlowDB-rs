@@ -1,45 +1,79 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 struct StorageServer {
-    partitions: Vec<Arc<Mutex<Partition>>>,
+    partitions: Vec<Arc<RwLock<Partition>>>,
+    replicas: usize,
 }
 
 #[derive(Debug)]
 struct Partition {
     data: HashMap<String, String>,
+    replicas: Vec<Arc<RwLock<Partition>>>,
 }
 
 impl StorageServer {
-    fn new(num_partitions: usize) -> Self {
+    fn new(num_partitions: usize, num_replicas: usize) -> Self {
         let mut partitions = Vec::with_capacity(num_partitions);
         for _ in 0..num_partitions {
-            partitions.push(Arc::new(Mutex::new(Partition {
-                data: HashMap::new(),
-            })));
+            let mut replicas = Vec::with_capacity(num_replicas);
+            for _ in 0..num_replicas {
+                replicas.push(Arc::new(RwLock::new(Partition {
+                    data: HashMap::new(),
+                    replicas: Vec::with_capacity(num_replicas),
+                })));
+            }
+            partitions.push(replicas[0].clone());
+            for replica in replicas.iter() {
+                let mut replica_guard = replica.write().unwrap();
+                replica_guard.replicas = replicas.clone();
+            }
         }
-        Self { partitions }
+        Self { partitions, replicas: num_replicas }
     }
 
-    fn get_partition(&self, key: &str) -> Arc<Mutex<Partition>> {
+    fn get_partition(&self, key: &str) -> Arc<RwLock<Partition>> {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         let partition_index = hasher.finish() as usize % self.partitions.len();
         self.partitions[partition_index].clone()
     }
 
+    /// Returns the value associated with the given key, or an error if the key is not found.
     fn get(&self, key: &str) -> Result<String, ()> {
+        // Determine which partition the key belongs to.
         let partition = self.get_partition(key);
-        let partition_guard = partition.lock().unwrap();
-        partition_guard.data.get(key).cloned().ok_or(())
+
+        // Acquire a read lock on the partition to ensure exclusive access.
+        let partition_guard = partition.read().unwrap();
+
+        // Look up the key in the partition data.
+        match partition_guard.data.get(key) {
+            Some(value) => Ok(value.clone()),
+            None => Err(()),
+        }
     }
 
-    fn put(&self, key: String, value: String) -> Result<(), ()> {
-        let partition = self.get_partition(&key);
-        let mut partition_guard = partition.lock().unwrap();
-        partition_guard.data.insert(key, value);
+    /// Inserts a key-value pair into the partition and its replicas.
+    fn put(&self, key: &str, value: &str) -> Result<(), ()> {
+        // Determine which partition the key belongs to.
+        let partition = self.get_partition(key);
+
+        // Acquire a lock on the partition to ensure exclusive access.
+        let mut partition_guard = partition.write().unwrap();
+
+        // Insert the key-value pair into the primary partition.
+        partition_guard.data.insert(key.to_owned(), value.to_owned());
+
+        // Insert the key-value pair into the replica partitions.
+        for replica in partition_guard.replicas.iter().skip(1) {
+            let mut replica_guard = replica.write().unwrap();
+            replica_guard.data.insert(key.to_owned(), value.to_owned());
+        }
+
+        // Return success.
         Ok(())
     }
 }
@@ -54,37 +88,77 @@ mod tests {
 
     #[test]
     fn test_new_storage_server() {
-        let num_partitions = 4;
-        let storage_server = StorageServer::new(num_partitions);
+        let num_partitions = 3;
+        let num_replicas = 2;
+        let storage_server = StorageServer::new(num_partitions, num_replicas);
         assert_eq!(storage_server.partitions.len(), num_partitions);
+        assert_eq!(storage_server.replicas, num_replicas);
     }
-
+    
     #[test]
     fn test_get_partition() {
-        let num_partitions = 4;
-        let storage_server = StorageServer::new(num_partitions);
-        let partition1 = storage_server.get_partition("key1");
-        let partition2 = storage_server.get_partition("key3");
-        assert_ne!(Arc::as_ptr(&partition1), Arc::as_ptr(&partition2));
+        let num_partitions = 3;
+        let num_replicas = 2;
+        let storage_server = StorageServer::new(num_partitions, num_replicas);
+        let partition = storage_server.get_partition("test_key");
+        assert!(partition.read().unwrap().data.is_empty());
+    }
+    
+    #[test]
+    fn test_get() {
+        let num_partitions = 3;
+        let num_replicas = 2;
+        let storage_server = StorageServer::new(num_partitions, num_replicas);
+        let key = "test_key";
+        let value = "test_value";
+        let partition = storage_server.get_partition(key);
+        let mut partition_guard = partition.write().unwrap();
+        partition_guard.data.insert(key.to_owned(), value.to_owned());
+        drop(partition_guard); // Release the lock early.
+        let result = storage_server.get(key);
+        assert_eq!(result, Ok(value.to_owned()));
     }
 
     #[test]
-    fn test_put_and_get() {
+    fn test_put_replicas() {
         let num_partitions = 4;
-        let storage_server = StorageServer::new(num_partitions);
-        let key = "test_key".to_string();
-        let value = "test_value".to_string();
-        storage_server.put(key.clone(), value.clone()).unwrap();
-        let result = storage_server.get(&key).unwrap();
-        assert_eq!(result, value);
+        let num_replicas = 2;
+        let storage_server = StorageServer::new(num_partitions, num_replicas);
+        let key = "test_key";
+        let value = "test_value";
+        let result = storage_server.put(key, value);
+        assert_eq!(result, Ok(()));
+        for i in 1..num_replicas {
+            let partition = storage_server.get_partition(key);
+            let replica = &partition.write().unwrap().replicas[i];
+            let replica_guard = replica.read().unwrap();
+            assert_eq!(replica_guard.data.get(key), Some(&value.to_string()));
+        }
+    }
+
+    #[test]
+    fn test_put_existing_key() {
+        let num_partitions = 4;
+        let num_replicas = 2;
+        let storage_server = StorageServer::new(num_partitions, num_replicas);
+        let key = "test_key";
+        let value1 = "test_value1";
+        let value2 = "test_value2";
+        let result = storage_server.put(key, value1);
+        assert_eq!(result, Ok(()));
+        let result = storage_server.put(key, value2);
+        assert_eq!(result, Ok(()));
+        let result = storage_server.get(key);
+        assert_eq!(result, Ok(value2.to_owned()));
     }
 
     #[test]
     fn test_get_nonexistent_key() {
         let num_partitions = 4;
-        let storage_server = StorageServer::new(num_partitions);
-        let key = "nonexistent_key".to_string();
-        let result = storage_server.get(&key);
+        let num_replicas = 2;
+        let storage_server = StorageServer::new(num_partitions, num_replicas);
+        let key = "test_key".to_string();
+        let result = storage_server.get(&key.clone());
         assert_eq!(result, Err(()));
     }
 }
