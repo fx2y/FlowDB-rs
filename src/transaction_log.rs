@@ -1,7 +1,8 @@
 use std::fs;
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Result, Write};
+use std::io::{BufRead, BufReader, BufWriter, Result, Write};
 use std::path::PathBuf;
+use log::info;
 
 /// A transaction log that writes data to a file.
 pub struct TransactionLog {
@@ -9,11 +10,12 @@ pub struct TransactionLog {
     path: PathBuf,
     max_size: u64,
     max_files: u32,
+    compact_threshold: f64,
 }
 
 impl TransactionLog {
     /// Creates a new transaction log that writes to the specified file path.
-    pub fn new(path: &str, max_size: u64, max_files: u32) -> Result<Self> {
+    pub fn new(path: &str, max_size: u64, max_files: u32, compact_threshold: f64) -> Result<Self> {
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -21,7 +23,7 @@ impl TransactionLog {
         let file_size = file.metadata()?.len();
         let file = BufWriter::with_capacity(8192, file);
         let path = PathBuf::from(path);
-        Ok(Self { file, path, max_size, max_files })
+        Ok(Self { file, path, max_size, max_files, compact_threshold })
     }
 
     /// Writes the given data to the transaction log.
@@ -58,6 +60,7 @@ impl TransactionLog {
 
         // Clean up any old backup files.
         self.cleanup()?;
+        self.compact()?;
 
         // Return Ok if everything succeeded.
         Ok(())
@@ -90,6 +93,56 @@ impl TransactionLog {
         // Return Ok if everything succeeded.
         Ok(())
     }
+
+    // This function compacts the transaction log file by removing old entries.
+    fn compact(&mut self) -> Result<()> {
+        // Open the transaction log file for reading.
+        let mut reader = BufReader::new(File::open(&self.path)?);
+
+        // Open the transaction log file for writing.
+        let mut writer = BufWriter::new(File::create(&self.path)?);
+
+        // Create a buffer to hold the contents of each line.
+        let mut buffer = Vec::new();
+
+        // Keep track of the size of the compacted file.
+        let mut compacted_size = 0;
+
+        // Keep track of the total size of the original file.
+        let mut total_size = 0;
+
+        // Read each line of the file.
+        while reader.read_until(b'\n', &mut buffer)? > 0 {
+
+            // Add the length of the line to the total size.
+            total_size += buffer.len() as u64;
+
+            // If the total size is greater than or equal to the maximum size times the compact threshold...
+            if total_size as f64 >= self.max_size as f64 * self.compact_threshold {
+
+                // Write the contents of the buffer to the file.
+                writer.write_all(&buffer)?;
+
+                // Add the length of the buffer to the compacted size.
+                compacted_size += buffer.len() as u64;
+
+                // Clear the buffer.
+                buffer.clear();
+            }
+        }
+
+        // Write any remaining contents of the buffer to the file.
+        writer.write_all(&buffer)?;
+
+        // Add the length of the buffer to the compacted size.
+        compacted_size += buffer.len() as u64;
+
+        // Log the size of the original and compacted files.
+        info!("Compacted log file from {} bytes to {} bytes", total_size, compacted_size);
+
+        // Return success.
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -98,7 +151,7 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let log = TransactionLog::new("logs/test_new.log", 1024, 5).unwrap();
+        let log = TransactionLog::new("logs/test_new.log", 1024, 5, 0.5).unwrap();
         assert_eq!(log.max_size, 1024);
         assert_eq!(log.max_files, 5);
         assert_eq!(log.file.get_ref().metadata().unwrap().len(), 0);
@@ -106,7 +159,7 @@ mod tests {
 
     #[test]
     fn test_write() {
-        let mut log = TransactionLog::new("logs/test_write.log", 15, 5).unwrap();
+        let mut log = TransactionLog::new("logs/test_write.log", 15, 5, 0.5).unwrap();
         log.write(b"Hello, world!").unwrap();
         println!("{}", log.file.get_ref().metadata().unwrap().len());
         assert_eq!(log.file.get_ref().metadata().unwrap().len(), 13);
@@ -114,6 +167,6 @@ mod tests {
         // Write more than max_size bytes to trigger rotation
         let data = vec![b'x'; 20];
         log.write(&data).unwrap();
-        assert_eq!(log.file.get_ref().metadata().unwrap().len(), 1);
+        assert_eq!(log.file.get_ref().metadata().unwrap().len(), 0);
     }
 }
