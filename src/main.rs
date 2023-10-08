@@ -3,10 +3,13 @@ mod transaction_log;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, RwLock};
+use std::net::TcpListener;
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread;
+use log::error;
 use snap::raw::Encoder as SnapEncoder;
 use snap::raw::Decoder as SnapDecoder;
-use crate::transaction_log::TransactionLog;
+use crate::transaction_log::{handle_client, TransactionLog};
 
 struct StorageServer {
     partitions: Vec<Arc<RwLock<Partition>>>,
@@ -100,9 +103,16 @@ fn decompress(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn main() -> std::io::Result<()> {
-    let mut log = TransactionLog::new("logs/transactions.log", 1024 * 1024 * 10, 10, 0.5, 8192, Box::new(|data| data.to_vec()))?;
-    log.write(b"Transaction 1")?;
-    log.write(b"Transaction 2")?;
+    let log = Arc::new(Mutex::new(TransactionLog::new("logs/transactions.log", 1024 * 1024 * 10, 10, 0.5, 8192, Box::new(|data| data.to_vec()))?));
+    let listener = TcpListener::bind("127.0.0.1:8080")?;
+    for stream in listener.incoming() {
+        let log = log.clone();
+        thread::spawn(move || {
+            if let Err(e) = handle_client(stream.unwrap(), log) {
+                error!("Error handling client: {}", e);
+            }
+        });
+    }
     Ok(())
 }
 

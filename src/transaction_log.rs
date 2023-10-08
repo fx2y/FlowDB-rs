@@ -1,7 +1,9 @@
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Result, Write};
+use std::net::TcpStream;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use log::info;
 
 /// A transaction log that writes data to a file.
@@ -25,7 +27,7 @@ impl TransactionLog {
         let file_size = file.metadata()?.len();
         let file = BufWriter::with_capacity(8192, file);
         let path = PathBuf::from(path);
-        Ok(Self { file, path, max_size, max_files, compact_threshold, read_buffer_size, format  })
+        Ok(Self { file, path, max_size, max_files, compact_threshold, read_buffer_size, format })
     }
 
     /// Writes the given data to the transaction log.
@@ -146,6 +148,16 @@ impl TransactionLog {
         // Return success.
         Ok(())
     }
+}
+
+pub fn handle_client(stream: TcpStream, log: Arc<Mutex<TransactionLog>>) -> std::io::Result<()> {
+    let mut reader = BufReader::new(&stream);
+    let mut buffer = Vec::new();
+    while reader.read_until(b'\n', &mut buffer)? > 0 {
+        log.lock().unwrap().write(&buffer)?;
+        buffer.clear();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
