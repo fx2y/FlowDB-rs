@@ -27,9 +27,12 @@ impl StorageServer {
                     replicas: Vec::with_capacity(num_replicas),
                 })));
             }
-            partitions.push(replicas[0].clone());
+            partitions.push(Arc::clone(&replicas[0]));
             for replica in replicas.iter() {
-                let mut replica_guard = replica.write().unwrap();
+                let mut replica_guard = match replica.write() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
                 replica_guard.replicas = replicas.clone();
             }
         }
