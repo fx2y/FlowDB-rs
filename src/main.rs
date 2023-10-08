@@ -100,7 +100,7 @@ fn decompress(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn main() -> std::io::Result<()> {
-    let mut log = TransactionLog::new("transactions.log")?;
+    let mut log = TransactionLog::new("transactions.log", 1024 * 1024 * 10, 10)?;
     log.write(b"Transaction 1")?;
     log.write(b"Transaction 2")?;
     Ok(())
