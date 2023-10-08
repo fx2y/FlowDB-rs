@@ -7,6 +7,7 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use log::error;
+use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 use snap::raw::Encoder as SnapEncoder;
 use snap::raw::Decoder as SnapDecoder;
 use crate::transaction_log::{handle_client, TransactionLog};
@@ -104,12 +105,24 @@ fn decompress(data: &[u8]) -> Option<Vec<u8>> {
 
 fn main() -> std::io::Result<()> {
     let log = Arc::new(Mutex::new(TransactionLog::new("logs/transactions.log", 1024 * 1024 * 10, 10, 0.5, 8192, Box::new(|data| data.to_vec()))?));
+    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
+    builder.set_private_key_file("key.pem", SslFiletype::PEM)?;
+    builder.set_certificate_chain_file("cert.pem")?;
+    let acceptor = builder.build();
     let listener = TcpListener::bind("127.0.0.1:8080")?;
     for stream in listener.incoming() {
         let log = log.clone();
+        let acceptor = acceptor.clone();
         thread::spawn(move || {
-            if let Err(e) = handle_client(stream.unwrap(), log) {
-                error!("Error handling client: {}", e);
+            match acceptor.accept(stream.unwrap()) {
+                Ok(stream) => {
+                    if let Err(e) = handle_client(stream, log) {
+                        error!("Error handling client: {}", e);
+                    }
+                }
+                Err(e) => {
+                    error!("TLS accept error: {}", e);
+                }
             }
         });
     }

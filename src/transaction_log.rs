@@ -1,10 +1,12 @@
 use std::fs;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Result, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Result, Write};
 use std::net::TcpStream;
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use log::info;
+use log::{error, info};
+use openssl::ssl::SslStream;
 
 /// A transaction log that writes data to a file.
 pub struct TransactionLog {
@@ -150,11 +152,14 @@ impl TransactionLog {
     }
 }
 
-pub fn handle_client(stream: TcpStream, log: Arc<Mutex<TransactionLog>>) -> std::io::Result<()> {
-    let mut reader = BufReader::new(&stream);
-    let mut buffer = Vec::new();
-    while reader.read_until(b'\n', &mut buffer)? > 0 {
-        log.lock().unwrap().write(&buffer)?;
+pub fn handle_client(stream: SslStream<TcpStream>, log: Arc<Mutex<TransactionLog>>) -> Result<()> {
+    let mut reader = BufReader::new(stream);
+    let mut buffer = String::new();
+    while reader.read_line(&mut buffer)? > 0 {
+        if let Err(e) = log.lock().unwrap().write(buffer.as_bytes()) {
+            error!("Transaction log write error: {}", e);
+            return Err(e.into());
+        }
         buffer.clear();
     }
     Ok(())
