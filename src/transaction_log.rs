@@ -11,11 +11,13 @@ pub struct TransactionLog {
     max_size: u64,
     max_files: u32,
     compact_threshold: f64,
+    read_buffer_size: usize,
+    format: Box<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>,
 }
 
 impl TransactionLog {
     /// Creates a new transaction log that writes to the specified file path.
-    pub fn new(path: &str, max_size: u64, max_files: u32, compact_threshold: f64) -> Result<Self> {
+    pub fn new(path: &str, max_size: u64, max_files: u32, compact_threshold: f64, read_buffer_size: usize, format: Box<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>) -> Result<Self> {
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -23,12 +25,13 @@ impl TransactionLog {
         let file_size = file.metadata()?.len();
         let file = BufWriter::with_capacity(8192, file);
         let path = PathBuf::from(path);
-        Ok(Self { file, path, max_size, max_files, compact_threshold })
+        Ok(Self { file, path, max_size, max_files, compact_threshold, read_buffer_size, format  })
     }
 
     /// Writes the given data to the transaction log.
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
-        self.file.write_all(data)?;
+        let formatted_data = (self.format)(data);
+        self.file.write_all(&formatted_data)?;
         if self.file.buffer().len() as u64 >= self.max_size {
             self.rotate()?;
         }
@@ -97,7 +100,7 @@ impl TransactionLog {
     // This function compacts the transaction log file by removing old entries.
     fn compact(&mut self) -> Result<()> {
         // Open the transaction log file for reading.
-        let mut reader = BufReader::new(File::open(&self.path)?);
+        let mut reader = BufReader::with_capacity(self.read_buffer_size, File::open(&self.path)?);
 
         // Open the transaction log file for writing.
         let mut writer = BufWriter::new(File::create(&self.path)?);
@@ -151,7 +154,7 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let log = TransactionLog::new("logs/test_new.log", 1024, 5, 0.5).unwrap();
+        let log = TransactionLog::new("logs/test_new.log", 1024, 5, 0.5, 8192, Box::new(|data| data.to_vec())).unwrap();
         assert_eq!(log.max_size, 1024);
         assert_eq!(log.max_files, 5);
         assert_eq!(log.file.get_ref().metadata().unwrap().len(), 0);
@@ -159,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_write() {
-        let mut log = TransactionLog::new("logs/test_write.log", 15, 5, 0.5).unwrap();
+        let mut log = TransactionLog::new("logs/test_write.log", 15, 5, 0.5, 8192, Box::new(|data| data.to_vec())).unwrap();
         log.write(b"Hello, world!").unwrap();
         println!("{}", log.file.get_ref().metadata().unwrap().len());
         assert_eq!(log.file.get_ref().metadata().unwrap().len(), 13);
