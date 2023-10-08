@@ -1,9 +1,12 @@
+mod transaction_log;
+
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 use snap::raw::Encoder as SnapEncoder;
 use snap::raw::Decoder as SnapDecoder;
+use crate::transaction_log::TransactionLog;
 
 struct StorageServer {
     partitions: Vec<Arc<RwLock<Partition>>>,
@@ -96,8 +99,11 @@ fn decompress(data: &[u8]) -> Option<Vec<u8>> {
     SnapDecoder::new().decompress_vec(data).ok()
 }
 
-fn main() {
-    println!("Hello, world!");
+fn main() -> std::io::Result<()> {
+    let mut log = TransactionLog::new("transactions.log")?;
+    log.write(b"Transaction 1")?;
+    log.write(b"Transaction 2")?;
+    Ok(())
 }
 
 #[cfg(test)]
